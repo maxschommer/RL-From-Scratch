@@ -5,6 +5,7 @@ import cProfile
 import gym
 import numpy as np
 import matplotlib.pyplot as plt
+
 from itertools import product
 from typing import Callable, List, Any, Union, Iterable
 
@@ -40,7 +41,7 @@ def gaussian_random(mean: float, variance: float) -> float:
     return np.random.normal(mean, variance)
 
 
-class LinearFeatureApproximator(object):
+class CoarseCodedApproximator(object):
     """A coarse coded generic linear feature approximator, which
     can be used as a value/action-value function.
     """
@@ -145,7 +146,8 @@ class LinearFeatureApproximator(object):
             idxs.append(list(np.flatnonzero(binary_vec)
                              * np.product(feat_dims[i+1:])))
         feat_lens.reverse()
-
+        if (len(list(product(*idxs))) == 0):
+            return []
         feat_vecs = np.sum(np.asarray(list(product(*idxs)), dtype=int), axis=1)
         return feat_vecs
 
@@ -162,7 +164,7 @@ class LinearFeatureApproximator(object):
         return np.sum(self.theta[idxs])
 
 
-def eval_func(func_to_eval, arg_vals):
+def eval_func(func_to_eval, arg_vals) -> np.ndarray:
     dims = []
     for arg_val in arg_vals:
         dims.append(len(arg_val))
@@ -175,6 +177,7 @@ def eval_func(func_to_eval, arg_vals):
 
 
 def plot_2d(X, Y, Z, labels={"xlabel": "x", "ylabel": "y", "zlabel": "z"}):
+    plt.ioff()
     xv, yv = np.meshgrid(X, Y, sparse=False, indexing='ij')
     plt.figure()
     ax = plt.axes(projection='3d')
@@ -192,18 +195,37 @@ def plot_2d(X, Y, Z, labels={"xlabel": "x", "ylabel": "y", "zlabel": "z"}):
     plt.show()
 
 
-class SarsaLambda(object):
-    def __init__(self, env, num_features_per_dim=20, overlap=0.5, lam=.9, gamma=1, alpha=0.01):
+def plot_Q(Q):
+    evQ = eval_func(Q.evaluate, Q._feature_vector_packed)
+    plot_2d(Q._feature_vector_packed[0],
+            Q._feature_vector_packed[1], -np.max(evQ, axis=2),
+            labels={"xlabel": "Position", "ylabel": "Velocity", "zlabel": "Reward"})
 
-        self.state_space = env.observation_space
-        self.action_space = env.action_space
-        self.Q = LinearFeatureApproximator()
+
+class SarsaLambda(object):
+    def __init__(self, env, num_features_per_dim=20, overlap=1, lam=.9, gamma=1, alpha=0.01, finite_bound=1):
+
+        self.state_space = self.bound_finite(
+            env.observation_space, finite_bound)
+        self.action_space = self.bound_finite(env.action_space, finite_bound)
+        self.Q = CoarseCodedApproximator()
+
         self.Q.build([self.state_space, self.action_space],
                      num_features_per_dim=num_features_per_dim, overlap=overlap)
-
+        # self.Q_eval = eval_func(self.Q.evaluate, self.Q._feature_vector_packed)
         self.lam = lam
         self.gamma = gamma
         self.alpha = alpha
+
+    def bound_finite(self, space, bound):
+        if isinstance(space, gym.spaces.Box):
+            b_high = space.high
+            b_high[b_high == np.inf] = bound
+            b_low = space.low
+            b_low[b_low == np.inf] = -bound
+            return gym.spaces.Box(b_low, b_high)
+        if isinstance(space, gym.spaces.Discrete):
+            return space
 
     def act_epsilon_greedy(self, s, N, N0=100):
         N_val = 0
@@ -220,14 +242,31 @@ class SarsaLambda(object):
         else:
             return np.argmax(action_vals)
 
-    def train(self, episodes, N0=100):
-
+    def train(self, episodes, N0=100, liveplot=False, liveplot_freq=1):
+        ts = []
+        if liveplot:
+            plt.ion()
+            xv, yv = np.meshgrid(
+                self.Q._feature_vector_packed[0],
+                self.Q._feature_vector_packed[1], sparse=False, indexing='ij')
+            fig = plt.figure()
+            ax = plt.axes(projection='3d')
+            wf = ax.plot_wireframe(
+                xv, yv, np.max(self.Q_eval, axis=2), color='black')
+            ax.set_xlabel("Position")
+            ax.set_ylabel("Velocity")
+            ax.set_zlabel("Reward")
+            plt.show()
+            plt.pause(.001)
         N = np.zeros_like(self.Q.theta)
         for _ in range(episodes):
+            if liveplot:
+                rand_t_offset = np.random.randint(0, liveplot_freq)
             E = np.zeros_like(self.Q.theta)
             s = env.reset()
             a = self.act_epsilon_greedy(s, N, N0=N0)
             t = 0
+
             while True:
                 N[self.Q.get_binary_idxs([*s, a])] += 1
                 s_prime, r, done, _ = env.step(a)
@@ -242,10 +281,22 @@ class SarsaLambda(object):
                 E[idxs] += 1
                 E = self.gamma*self.lam*E
                 self.Q.theta += self.alpha*delta*E
-
+                if (liveplot and ((t+rand_t_offset) % liveplot_freq == 0)):
+                    new_evals = []
+                    idxs = np.flatnonzero(E)
+                    for idx in idxs:
+                        new_evals.append(self.Q.theta[idx])
+                    flat_Q_eval = self.Q_eval.flatten()
+                    flat_Q_eval[idxs] = new_evals
+                    self.Q_eval = flat_Q_eval.reshape(self.Q_eval.shape)
+                    wf.remove()
+                    wf = ax.plot_wireframe(
+                        xv, yv, np.max(self.Q_eval, axis=2), color='black')
+                    plt.pause(.001)
                 if done:
                     print(
-                        "Episode finished after {} timesteps with reward {}".format(t+1, r))
+                        "Episode finished after {} timesteps with reward {} and avg timesteps {}".format(t+1, r, np.mean(ts[-100:])))
+                    ts.append(t + 1)
                     break
                 else:
                     t += 1
@@ -255,29 +306,11 @@ class SarsaLambda(object):
 
 
 env = gym.make("MountainCar-v0")
-Q = LinearFeatureApproximator()
-Q.build([env.observation_space, env.action_space], num_features_per_dim=20,
-        overlap=1, theta_init=gaussian_random, theta_init_args=[0, 1])
-# print(Q.get_binary_idxs([.5, 0.025, 1]))
-# print(Q.evaluate([.5, 0.025, 1]))
 
+# print(env.observation_space.high)
 
-sl = SarsaLambda(env, lam=.9, num_features_per_dim=50, overlap=2.5, alpha=0.01)
-sl.train(400, 100)
-# pr = cProfile.Profile()
-# pr.enable()
+sl = SarsaLambda(env, lam=.9, num_features_per_dim=50,
+                 overlap=2.5, alpha=0.005, gamma=0.99, finite_bound=10)
+sl.train(1000, 100)
 
-evQ = eval_func(sl.Q.evaluate, sl.Q._feature_vector_packed)
-plot_2d(sl.Q._feature_vector_packed[0],
-        sl.Q._feature_vector_packed[1], -np.max(evQ, axis=2),
-        labels={"xlabel": "Position", "ylabel": "Velocity", "zlabel": "Reward"})
-
-
-# evQ = eval_func(sl.Q.evaluate, sl.Q._feature_vector_packed)
-
-# pr.disable()
-# s = io.StringIO()
-# sortby = 'cumulative'
-# ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
-# ps.print_stats()
-# print(s.getvalue())
+# plot_Q(sl.Q)
