@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from itertools import product
-from typing import Callable, List, Any, Union, Iterable
+from typing import Callable, List, Any, Union, Iterable, Dict
 
 
 # Mountain Car
@@ -50,7 +50,7 @@ class CoarseCodedApproximator(object):
         self.theta = []
         self.in_range: Iterable[Any] = []
 
-        self._feature_vector_packed: Iterable[Any] = []
+        self._feature_vector_packed: List[Any] = []
 
     def initialize_theta(self,
                          num_features: int,
@@ -164,7 +164,7 @@ class CoarseCodedApproximator(object):
         return np.sum(self.theta[idxs])
 
 
-def eval_func(func_to_eval, arg_vals) -> np.ndarray:
+def eval_func(func_to_eval: Callable, arg_vals: List[Any]) -> np.ndarray:
     dims = []
     for arg_val in arg_vals:
         dims.append(len(arg_val))
@@ -176,7 +176,10 @@ def eval_func(func_to_eval, arg_vals) -> np.ndarray:
     return np.asarray(res).reshape(dims)
 
 
-def plot_2d(X, Y, Z, labels={"xlabel": "x", "ylabel": "y", "zlabel": "z"}):
+def plot_2d(X: np.ndarray,
+            Y: np.ndarray,
+            Z: np.ndarray,
+            labels: Dict[str, str] = {"xlabel": "x", "ylabel": "y", "zlabel": "z"}):
     plt.ioff()
     xv, yv = np.meshgrid(X, Y, sparse=False, indexing='ij')
     plt.figure()
@@ -195,7 +198,7 @@ def plot_2d(X, Y, Z, labels={"xlabel": "x", "ylabel": "y", "zlabel": "z"}):
     plt.show()
 
 
-def plot_Q(Q):
+def plot_Q(Q: CoarseCodedApproximator):
     evQ = eval_func(Q.evaluate, Q._feature_vector_packed)
     plot_2d(Q._feature_vector_packed[0],
             Q._feature_vector_packed[1], -np.max(evQ, axis=2),
@@ -203,7 +206,14 @@ def plot_Q(Q):
 
 
 class SarsaLambda(object):
-    def __init__(self, env, num_features_per_dim=20, overlap=1, lam=.9, gamma=1, alpha=0.01, finite_bound=1):
+    def __init__(self,
+                 env: gym.Env,
+                 num_features_per_dim: int = 20,
+                 overlap: float = 1,
+                 lam: float = .9,
+                 gamma: float = 1,
+                 alpha: float = 0.01,
+                 finite_bound: float = 1):
 
         self.state_space = self.bound_finite(
             env.observation_space, finite_bound)
@@ -212,12 +222,13 @@ class SarsaLambda(object):
 
         self.Q.build([self.state_space, self.action_space],
                      num_features_per_dim=num_features_per_dim, overlap=overlap)
-        # self.Q_eval = eval_func(self.Q.evaluate, self.Q._feature_vector_packed)
+
         self.lam = lam
         self.gamma = gamma
         self.alpha = alpha
 
-    def bound_finite(self, space, bound):
+    def bound_finite(self, space: Union[gym.spaces.Box, gym.spaces.Discrete],
+                     bound: float) -> Union[gym.spaces.Box, gym.spaces.Discrete]:
         if isinstance(space, gym.spaces.Box):
             b_high = space.high
             b_high[b_high == np.inf] = bound
@@ -226,8 +237,14 @@ class SarsaLambda(object):
             return gym.spaces.Box(b_low, b_high)
         if isinstance(space, gym.spaces.Discrete):
             return space
+        else:
+            # TODO: Cover other space types
+            return space
 
-    def act_epsilon_greedy(self, s, N, N0=100):
+    def act_epsilon_greedy(self,
+                           s: np.ndarray,
+                           N: np.ndarray,
+                           N0: float = 100) -> int:
         N_val = 0
         for a in range(self.action_space.n):
             N_val += np.sum(N[self.Q.get_binary_idxs([*s, a])])
@@ -242,17 +259,22 @@ class SarsaLambda(object):
         else:
             return np.argmax(action_vals)
 
-    def train(self, episodes, N0=100, liveplot=False, liveplot_freq=1):
-        ts = []
+    def train(self, episodes: int,
+              N0: float = 100,
+              liveplot: bool = False,
+              liveplot_freq: int = 1):
+
+        ts: List[int] = []
         if liveplot:
+            Q_eval = eval_func(self.Q.evaluate, self.Q._feature_vector_packed)
             plt.ion()
             xv, yv = np.meshgrid(
                 self.Q._feature_vector_packed[0],
                 self.Q._feature_vector_packed[1], sparse=False, indexing='ij')
-            fig = plt.figure()
+            plt.figure()
             ax = plt.axes(projection='3d')
             wf = ax.plot_wireframe(
-                xv, yv, np.max(self.Q_eval, axis=2), color='black')
+                xv, yv, np.max(Q_eval, axis=2), color='black')
             ax.set_xlabel("Position")
             ax.set_ylabel("Velocity")
             ax.set_zlabel("Reward")
@@ -276,7 +298,6 @@ class SarsaLambda(object):
                 delta = r + self.gamma * \
                     self.Q.evaluate([*s_prime, a_prime]) - \
                     self.Q.evaluate([*s, a])
-                # print(r)
                 idxs = self.Q.get_binary_idxs([*s, a])
                 E[idxs] += 1
                 E = self.gamma*self.lam*E
@@ -286,12 +307,12 @@ class SarsaLambda(object):
                     idxs = np.flatnonzero(E)
                     for idx in idxs:
                         new_evals.append(self.Q.theta[idx])
-                    flat_Q_eval = self.Q_eval.flatten()
+                    flat_Q_eval = Q_eval.flatten()
                     flat_Q_eval[idxs] = new_evals
-                    self.Q_eval = flat_Q_eval.reshape(self.Q_eval.shape)
+                    Q_eval = flat_Q_eval.reshape(Q_eval.shape)
                     wf.remove()
                     wf = ax.plot_wireframe(
-                        xv, yv, np.max(self.Q_eval, axis=2), color='black')
+                        xv, yv, np.max(Q_eval, axis=2), color='black')
                     plt.pause(.001)
                 if done:
                     print(
@@ -307,10 +328,8 @@ class SarsaLambda(object):
 
 env = gym.make("MountainCar-v0")
 
-# print(env.observation_space.high)
-
 sl = SarsaLambda(env, lam=.9, num_features_per_dim=50,
                  overlap=2.5, alpha=0.005, gamma=0.99, finite_bound=10)
-sl.train(1000, 100)
+sl.train(1000, 100, liveplot=True, liveplot_freq=20)
 
-# plot_Q(sl.Q)
+plot_Q(sl.Q)
